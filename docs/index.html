@@ -130,8 +130,7 @@
         </button>
 
         <div class="settings-panel">
-            <input type="text" id="ipAddress" placeholder="ESP32 IP Address">
-            <div id="status" class="status-bar">Ready</div>
+            <div id="status" class="status-bar">Connecting to Cloud...</div>
             
             <div class="secondary-controls">
                 <button class="btn-small" onclick="sendCommand('stop')">STOP</button>
@@ -141,46 +140,76 @@
         </div>
     </div>
 
+    <!-- Include Paho MQTT JS Client -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js" type="text/javascript"></script>
+
     <script>
-        // Load saved IP
-        const ipInput = document.getElementById('ipAddress');
-        ipInput.value = localStorage.getItem('esp32_ip') || '';
+        // MQTT Configuration
+        const mqtt_broker = "broker.emqx.io";
+        const mqtt_port = 8083; // WebSocket port (Secure WSS is 8084, but mixed content might be an issue if not careful. GitHub Pages is HTTPS, so we should use WSS)
+        const mqtt_topic_cmd = "suntracker/cmd";
+        const mqtt_topic_status = "suntracker/status";
+        
+        let client;
+        let isConnected = false;
 
-        ipInput.addEventListener('input', (e) => {
-            localStorage.setItem('esp32_ip', e.target.value);
-        });
+        function connectMQTT() {
+            const clientId = "WebClient-" + Math.random().toString(16).substr(2, 8);
+            // Use WSS (Secure WebSockets) for GitHub Pages compatibility
+            client = new Paho.MQTT.Client(mqtt_broker, 8084, "/mqtt", clientId);
 
-        async function sendCommand(action) {
-            const ip = ipInput.value;
-            const statusDiv = document.getElementById('status');
-            
-            if (!ip) {
-                showStatus('Enter IP Address first', 'error');
+            client.onConnectionLost = onConnectionLost;
+            client.onMessageArrived = onMessageArrived;
+
+            const options = {
+                useSSL: true,
+                onSuccess: onConnect,
+                onFailure: onFailure,
+                keepAliveInterval: 30
+            };
+
+            showStatus("Connecting to Cloud...", "");
+            client.connect(options);
+        }
+
+        function onConnect() {
+            console.log("MQTT Connected");
+            isConnected = true;
+            showStatus("Online & Ready", "success");
+            client.subscribe(mqtt_topic_status);
+        }
+
+        function onFailure(message) {
+            console.log("Connection failed: " + message.errorMessage);
+            showStatus("Cloud Connection Failed", "error");
+            setTimeout(connectMQTT, 5000); // Retry
+        }
+
+        function onConnectionLost(responseObject) {
+            if (responseObject.errorCode !== 0) {
+                console.log("onConnectionLost:"+responseObject.errorMessage);
+                showStatus("Connection Lost", "error");
+                isConnected = false;
+                setTimeout(connectMQTT, 5000); // Retry
+            }
+        }
+
+        function onMessageArrived(message) {
+            console.log("Status update: " + message.payloadString);
+            // Optional: Update UI based on status
+            // showStatus(message.payloadString, "success");
+        }
+
+        function sendCommand(action) {
+            if (!isConnected) {
+                showStatus("Not Connected!", "error");
                 return;
             }
 
-            showStatus('Sending...', '');
-
-            try {
-                const controller = new AbortController();
-                const timeoutId = setTimeout(() => controller.abort(), 3000);
-
-                const response = await fetch(`http://${ip}/action?type=${action}`, {
-                    method: 'GET',
-                    signal: controller.signal
-                });
-                
-                clearTimeout(timeoutId);
-
-                if (response.ok) {
-                    showStatus('Done!', 'success');
-                    setTimeout(() => showStatus('Ready', ''), 2000);
-                } else {
-                    showStatus('Error: ' + response.status, 'error');
-                }
-            } catch (error) {
-                showStatus('Connection Failed', 'error');
-            }
+            message = new Paho.MQTT.Message(action);
+            message.destinationName = mqtt_topic_cmd;
+            client.send(message);
+            showStatus("Sent: " + action, "");
         }
 
         function showStatus(msg, type) {
@@ -188,6 +217,9 @@
             el.textContent = msg;
             el.className = 'status-bar ' + (type === 'success' ? 'status-success' : type === 'error' ? 'status-error' : '');
         }
+
+        // Start connection on load
+        window.onload = connectMQTT;
     </script>
 </body>
 </html>
